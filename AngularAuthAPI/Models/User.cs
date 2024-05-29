@@ -1,4 +1,5 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿using Microsoft.VisualBasic;
+using System.ComponentModel.DataAnnotations;
 
 namespace AngularAuthAPI.Models
 {
@@ -14,5 +15,8 @@ namespace AngularAuthAPI.Models
         public string Token { get; set; } = string.Empty;
         public string Role { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
+
+        public string RefreshToken { get; set; }=string.Empty;
+        public DateTime RefreshTokenExpiryTime { get; set; }
     }
 }

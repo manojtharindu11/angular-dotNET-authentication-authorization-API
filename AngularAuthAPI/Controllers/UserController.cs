@@ -1,6 +1,7 @@
 ﻿using AngularAuthAPI.Context;
 using AngularAuthAPI.Helpers;
 using AngularAuthAPI.Models;
+using AngularAuthAPI.Models.DTO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -8,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -40,12 +42,23 @@ namespace AngularAuthAPI.Controllers
                 return BadRequest(new { Message = "Password is incorrect!" });
 
             user.Token = CreateJwtToken(user);
+            var newAccessToken = user.Token;
+            var newRefreshToken = CreateRefreshToken();
+            user.RefreshToken = newRefreshToken;
+            user.RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(5);
+            await _appDbContext.SaveChangesAsync();
 
-            return Ok(new
+            //return Ok(new
+            //{
+            //    Token = user.Token,
+            //    Message = "Login success!"
+            //});
+
+            return Ok(new TokenApiDTO()
             {
-                Token = user.Token,
-                Message = "Login success!"
-            }); ;
+                AccessToken = newAccessToken,
+                RefreshToken = newRefreshToken
+            });
         }
 
         [HttpPost("register")]
@@ -111,7 +124,7 @@ namespace AngularAuthAPI.Controllers
             var identity = new ClaimsIdentity(new Claim[]
             {
                 new Claim(ClaimTypes.Role, user.Role),
-                new Claim(ClaimTypes.Name,$"{user.FirstName} {user.LastName}")
+                new Claim(ClaimTypes.Name,$"{user.UserName}")
 
             });
 
@@ -120,12 +133,49 @@ namespace AngularAuthAPI.Controllers
             var tokenDescriptor = new SecurityTokenDescriptor
             {
                 Subject = identity,
-                Expires = DateTime.Now.AddSeconds(10),
+                Expires = DateTime.Now.AddDays(1),
                 SigningCredentials = credentials
             };
 
             var token = jwtTokenHandler.CreateToken(tokenDescriptor);
             return jwtTokenHandler.WriteToken(token);
+        }
+
+        private String CreateRefreshToken()
+        {
+            var tokenBytes = RandomNumberGenerator.GetBytes(64);
+            var refreshToken = Convert.ToBase64String(tokenBytes);
+
+            var tokenInUser = _appDbContext.Users.
+                Any(a=> a.RefreshToken == refreshToken);
+
+            if (tokenInUser)
+            {
+                return CreateRefreshToken();
+            }
+            return refreshToken;
+        }
+
+        private ClaimsPrincipal GetPrincipalFromExpiredToken(string token)
+        {
+            var key = Encoding.ASCII.GetBytes("veryveryveryveryveryveryverververververyveryverysceret.....");
+
+            var tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateAudience = false,
+                ValidateIssuer = false,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(key),
+                ValidateLifetime = false
+            };
+
+            var tokenHandler = new JwtSecurityTokenHandler();
+            SecurityToken securityToken;
+            var principal = tokenHandler.ValidateToken(token,tokenValidationParameters, out securityToken);
+            var jwtSecurityToken = securityToken as JwtSecurityToken;
+            if (jwtSecurityToken != null || jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+                throw new SecurityTokenException("This is invalid Token");
+            return principal;
         }
 
         [Authorize]
@@ -134,5 +184,33 @@ namespace AngularAuthAPI.Controllers
         {
             return Ok(await _appDbContext.Users.ToListAsync());
         }
+
+        [HttpPost("refresh")]
+        public async Task<IActionResult> Refresh(TokenApiDTO tokenApiDTO)
+        {
+            if (tokenApiDTO == null)
+            {
+                return BadRequest("Invalid Client Request");
+            }
+
+            string accessToken = tokenApiDTO.AccessToken;
+            string refreshToken = tokenApiDTO.RefreshToken;
+            var principal = GetPrincipalFromExpiredToken(accessToken);
+            var username = principal.Identity.Name;
+            var user = await _appDbContext.Users.FirstOrDefaultAsync(u => u.UserName == username);
+            if (user is null || user.RefreshToken != refreshToken || user.RefreshTokenExpiryTime <= DateTime.Now)
+                return BadRequest("Invalid Request");
+
+            var newAccessToken = CreateJwtToken(user);
+            var newRefreshToken = CreateRefreshToken();
+            user.RefreshToken = newRefreshToken;
+            await _appDbContext.SaveChangesAsync();
+            return Ok(new TokenApiDTO()
+            {
+                AccessToken = newAccessToken,
+                RefreshToken = newRefreshToken
+            });
+        }
+
     }
 }
