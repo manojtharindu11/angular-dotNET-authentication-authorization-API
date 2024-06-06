@@ -2,6 +2,7 @@
 using AngularAuthAPI.Helpers;
 using AngularAuthAPI.Models;
 using AngularAuthAPI.Models.DTO;
+using AngularAuthAPI.UtilityService;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -20,9 +21,14 @@ namespace AngularAuthAPI.Controllers
     public class UserController : ControllerBase
     {
         private readonly AppDbContext _appDbContext;
-        public UserController(AppDbContext appDbContext)
+        private readonly IConfiguration _configuration;
+        private readonly IEmailService _emailService;
+
+        public UserController(AppDbContext appDbContext,IConfiguration configuration,IEmailService emailService)
         {
             _appDbContext = appDbContext;
+            _configuration = configuration;
+            _emailService = emailService;
         }
         [HttpPost("Authenticate")]
         public async Task<IActionResult> Authenticate([FromBody] User userObj)
@@ -133,7 +139,7 @@ namespace AngularAuthAPI.Controllers
             var tokenDescriptor = new SecurityTokenDescriptor
             {
                 Subject = identity,
-                Expires = DateTime.Now.AddDays(1),
+                Expires = DateTime.Now.AddSeconds(10),
                 SigningCredentials = credentials
             };
 
@@ -173,7 +179,7 @@ namespace AngularAuthAPI.Controllers
             SecurityToken securityToken;
             var principal = tokenHandler.ValidateToken(token,tokenValidationParameters, out securityToken);
             var jwtSecurityToken = securityToken as JwtSecurityToken;
-            if (jwtSecurityToken != null || jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+            if (jwtSecurityToken == null || !jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
                 throw new SecurityTokenException("This is invalid Token");
             return principal;
         }
@@ -210,6 +216,80 @@ namespace AngularAuthAPI.Controllers
                 AccessToken = newAccessToken,
                 RefreshToken = newRefreshToken
             });
+        }
+
+        [HttpPost("send-rest-email/{email}")]
+        public async Task<IActionResult> SendEmail([FromRoute] string email)
+        {
+            try
+            {
+                var user = await _appDbContext.Users.FirstOrDefaultAsync(a => a.Email == email);
+                if (user is null)
+                    return NotFound(new
+                    {
+                        StatusCode = 404,
+                        Message = "Email doesn't exist!"
+                    });
+
+                var tokenBytes = RandomNumberGenerator.GetBytes(64);
+                var emailToken = Convert.ToBase64String(tokenBytes);
+                user.ResetPasswordToken = emailToken;
+                user.ResetPasswordTokenExpiryTime = DateTime.Now.AddMinutes(15);
+
+                string from = _configuration["EmailSettings:From"];
+                var emailmodel = new Email(email, "Reset password!!", EmailBody.EmailStringBody(email, emailToken));
+
+                _emailService.SendEmail(emailmodel);
+                _appDbContext.Entry(user).State = EntityState.Modified;
+                await _appDbContext.SaveChangesAsync();
+                return Ok(new
+                {
+                    StatusCode = 200,
+                    Message = "Email sent!"
+                });
+            }
+
+            catch (Exception ex)
+            {
+                return BadRequest(ex.Message);
+            }
+
+        }
+
+        [HttpPost("reset-password")]
+        public async Task<IActionResult> ResetPassword(ResetPaswordDTO resetPaswordDTO)
+        {
+            var newToken = resetPaswordDTO.EmailToken.Replace(" ", "+");
+            var user = await _appDbContext.Users.AsNoTracking().FirstOrDefaultAsync(a=> a.Email == resetPaswordDTO.Email);
+
+            if (user is null)
+                return NotFound(new
+                {
+                    StatusCode = 404,
+                    Message = "Email doesn't exist!"
+                });
+            var tokenCode = user.ResetPasswordToken;
+            DateTime emailTokenExpirary = user.ResetPasswordTokenExpiryTime;
+
+            if (tokenCode != resetPaswordDTO.EmailToken || emailTokenExpirary < DateTime.Now)
+                return BadRequest(new
+                {
+                    StatusCode = 400,
+                    EmailToken = resetPaswordDTO.EmailToken,
+                    databaseToken = tokenCode,
+
+                    Message = "Invalid reset link"
+                }); ;
+
+            user.Password = PasswordHasher.HashPassword(resetPaswordDTO.NewPassword);
+            _appDbContext.Entry(user).State = EntityState.Modified;
+            await _appDbContext.SaveChangesAsync();
+            return Ok(new
+            {
+                StatusCode=200,
+                Message="Password reset Successfully!"
+            });
+
         }
 
     }
